@@ -131,7 +131,7 @@ jobs:
         run: |
           for serial in emulator-5554 emulator-5556; do
             echo "Waiting for $serial..."
-            timeout 300 adb wait-for-device -s $serial
+            timeout 300 adb -s $serial wait-for-device
             while [ "$(adb -s $serial shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do sleep 5; done
             echo "$serial booted"
           done
@@ -299,7 +299,7 @@ jobs:
         run: |
           for serial in emulator-5554 emulator-5556; do
             echo "Waiting for $serial..."
-            timeout 300 adb wait-for-device -s $serial
+            timeout 300 adb -s $serial wait-for-device
             while [ "$(adb -s $serial shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do sleep 5; done
             echo "$serial booted"
           done
