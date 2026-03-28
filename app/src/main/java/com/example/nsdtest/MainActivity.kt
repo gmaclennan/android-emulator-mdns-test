@@ -8,12 +8,14 @@ import android.util.Log
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import java.net.ServerSocket
+import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
         const val TAG = "NsdTest"
         const val SERVICE_TYPE = "_nsdtest._tcp."
+        const val ECHO_PREFIX = "ECHO:"
     }
 
     private var nsdManager: NsdManager? = null
@@ -35,6 +37,34 @@ class MainActivity : AppCompatActivity() {
         // Create a real listening socket — NSD requires a valid port
         serverSocket = ServerSocket(0)
         val port = serverSocket!!.localPort
+
+        // Accept TCP connections and echo back with a prefix
+        thread(isDaemon = true) {
+            Log.i(TAG, "Echo server listening on port $port")
+            while (!serverSocket!!.isClosed) {
+                try {
+                    val client = serverSocket!!.accept()
+                    Log.i(TAG, "Client connected from ${client.inetAddress}")
+                    thread(isDaemon = true) {
+                        try {
+                            val reader = client.getInputStream().bufferedReader()
+                            val writer = client.getOutputStream().bufferedWriter()
+                            val line = reader.readLine()
+                            Log.i(TAG, "Received: $line")
+                            writer.write("$ECHO_PREFIX$line\n")
+                            writer.flush()
+                            client.close()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error handling client", e)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (!serverSocket!!.isClosed) {
+                        Log.w(TAG, "Error accepting connection", e)
+                    }
+                }
+            }
+        }
 
         val serviceInfo = NsdServiceInfo().apply {
             this.serviceName = serviceName

@@ -6,11 +6,14 @@ import android.net.nsd.NsdServiceInfo
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -213,5 +216,111 @@ class NsdDiscoveryTest {
         try { serverSocket.close() } catch (e: Exception) { /* ignore */ }
 
         assertTrue("Service should register successfully, got error: $errorCode", registered)
+    }
+
+    /**
+     * Discover a service from the other emulator, resolve it to get host/port,
+     * then make a TCP connection and verify data exchange.
+     */
+    @Test
+    fun connectToDiscoveredService() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+
+        // Step 1: Discover the service from the other emulator
+        val discoveredService = ConcurrentLinkedQueue<NsdServiceInfo>()
+        val discoveryLatch = CountDownLatch(1)
+
+        val discoveryListener = object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(serviceType: String) {
+                Log.i(TAG, "[TCP] Discovery started")
+            }
+            override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+                Log.i(TAG, "[TCP] Service found: ${serviceInfo.serviceName}")
+                if (serviceInfo.serviceName.contains("Emulator2") ||
+                    (!serviceInfo.serviceName.contains("Tester") && !serviceInfo.serviceName.contains("RegTest"))) {
+                    discoveredService.add(serviceInfo)
+                    discoveryLatch.countDown()
+                }
+            }
+            override fun onServiceLost(serviceInfo: NsdServiceInfo) {}
+            override fun onDiscoveryStopped(serviceType: String) {}
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                fail("[TCP] Discovery failed: $errorCode")
+            }
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
+        }
+
+        nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+
+        assertTrue(
+            "[TCP] Should discover service within ${DISCOVERY_TIMEOUT_SECONDS}s",
+            discoveryLatch.await(DISCOVERY_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        )
+
+        val foundService = discoveredService.poll()
+        assertNotNull("[TCP] Discovered service should not be null", foundService)
+        Log.i(TAG, "[TCP] Found service: ${foundService!!.serviceName}, resolving...")
+
+        // Step 2: Resolve the service to get host and port
+        val resolveLatch = CountDownLatch(1)
+        var resolvedInfo: NsdServiceInfo? = null
+        var resolveError: Int? = null
+
+        nsdManager.resolveService(foundService, object : NsdManager.ResolveListener {
+            override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                Log.i(TAG, "[TCP] Resolved: host=${serviceInfo.host}, port=${serviceInfo.port}")
+                resolvedInfo = serviceInfo
+                resolveLatch.countDown()
+            }
+            override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                Log.e(TAG, "[TCP] Resolve failed: $errorCode")
+                resolveError = errorCode
+                resolveLatch.countDown()
+            }
+        })
+
+        assertTrue(
+            "[TCP] Service should resolve within 30s",
+            resolveLatch.await(30, TimeUnit.SECONDS)
+        )
+        assertNotNull("[TCP] Resolve should succeed, got error: $resolveError", resolvedInfo)
+
+        val host = resolvedInfo!!.host
+        val port = resolvedInfo!!.port
+        Log.i(TAG, "[TCP] Connecting to $host:$port")
+
+        // Step 3: Make TCP connection and exchange data
+        try {
+            val socket = Socket()
+            socket.connect(java.net.InetSocketAddress(host, port), 10_000)
+            Log.i(TAG, "[TCP] Connected to $host:$port")
+
+            val writer = socket.getOutputStream().bufferedWriter()
+            val reader = socket.getInputStream().bufferedReader()
+
+            val testMessage = "hello-from-emulator1"
+            writer.write("$testMessage\n")
+            writer.flush()
+            Log.i(TAG, "[TCP] Sent: $testMessage")
+
+            val response = reader.readLine()
+            Log.i(TAG, "[TCP] Received: $response")
+
+            socket.close()
+
+            assertNotNull("[TCP] Should receive a response", response)
+            assertEquals(
+                "[TCP] Response should echo back with prefix",
+                "ECHO:$testMessage",
+                response
+            )
+            Log.i(TAG, "[TCP] TCP connection test PASSED")
+        } catch (e: Exception) {
+            Log.e(TAG, "[TCP] Connection failed", e)
+            fail("[TCP] Failed to connect to $host:$port - ${e.message}")
+        } finally {
+            try { nsdManager.stopServiceDiscovery(discoveryListener) } catch (e: Exception) { /* ignore */ }
+        }
     }
 }
