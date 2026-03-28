@@ -355,12 +355,13 @@ jobs:
 
       - name: Collect diagnostics
         if: always()
+        timeout-minutes: 2
         run: |
           echo "=== Emulator 1 full NSD/mDNS logs ==="
-          adb -s emulator-5554 logcat -d 2>/dev/null | grep -i -E "(nsd|mdns|NsdTest|dns-sd|netd|multicast)" | tail -100 || true
+          timeout 10 adb -s emulator-5554 logcat -d 2>/dev/null | grep -i -E "(nsd|mdns|NsdTest|dns-sd|netd|multicast)" | tail -100 || true
           echo ""
           echo "=== Emulator 2 full NSD/mDNS logs ==="
-          adb -s emulator-5556 logcat -d 2>/dev/null | grep -i -E "(nsd|mdns|NsdTest|dns-sd|netd|multicast)" | tail -100 || true
+          timeout 10 adb -s emulator-5556 logcat -d 2>/dev/null | grep -i -E "(nsd|mdns|NsdTest|dns-sd|netd|multicast)" | tail -100 || true
           echo ""
           echo "=== Emulator 1 stderr log ==="
           tail -50 /tmp/emu1.log 2>/dev/null || true
@@ -374,9 +375,10 @@ jobs:
 
       - name: Cleanup
         if: always()
+        timeout-minutes: 1
         run: |
-          adb -s emulator-5554 emu kill 2>/dev/null || true
-          adb -s emulator-5556 emu kill 2>/dev/null || true
+          timeout 10 adb -s emulator-5554 emu kill 2>/dev/null || true
+          timeout 10 adb -s emulator-5556 emu kill 2>/dev/null || true
           kill $EMU1_PID 2>/dev/null || true
           kill $EMU2_PID 2>/dev/null || true
           sudo kill $DNSMASQ_PID 2>/dev/null || true
@@ -599,16 +601,18 @@ jobs:
 
       - name: Collect diagnostics
         if: always()
+        timeout-minutes: 2
         run: |
-          echo "=== Emu1 NSD logs ===" ; adb -s emulator-5554 logcat -d 2>/dev/null | grep -iE "(nsd|mdns|NsdTest|dns-sd)" | tail -80 || true
-          echo "=== Emu2 NSD logs ===" ; adb -s emulator-5556 logcat -d 2>/dev/null | grep -iE "(nsd|mdns|NsdTest|dns-sd)" | tail -80 || true
+          echo "=== Emu1 NSD logs ===" ; timeout 10 adb -s emulator-5554 logcat -d 2>/dev/null | grep -iE "(nsd|mdns|NsdTest|dns-sd)" | tail -80 || true
+          echo "=== Emu2 NSD logs ===" ; timeout 10 adb -s emulator-5556 logcat -d 2>/dev/null | grep -iE "(nsd|mdns|NsdTest|dns-sd)" | tail -80 || true
           echo "=== Emu1 stderr ===" ; tail -30 /tmp/emu1.log 2>/dev/null || true
           echo "=== Emu2 stderr ===" ; tail -30 /tmp/emu2.log 2>/dev/null || true
 
       - name: Cleanup
         if: always()
+        timeout-minutes: 1
         run: |
-          adb -s emulator-5554 emu kill 2>/dev/null || true
-          adb -s emulator-5556 emu kill 2>/dev/null || true
+          timeout 10 adb -s emulator-5554 emu kill 2>/dev/null || true
+          timeout 10 adb -s emulator-5556 emu kill 2>/dev/null || true
           kill $EMU1_PID 2>/dev/null || true
           kill $EMU2_PID 2>/dev/null || true
