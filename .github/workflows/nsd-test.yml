@@ -337,6 +337,19 @@ jobs:
           adb -s emulator-5554 shell "ip rule add from all lookup main pref 99" || true
           adb -s emulator-5556 shell "ip rule add from all lookup main pref 99" || true
 
+          # Disable the SLIRP interfaces so the shared NIC is the only network.
+          # This mimics a real device with one WiFi network, and ensures the
+          # mDNS daemon advertises the shared interface's address (not SLIRP).
+          # ADB still works because it goes through the emulator console port,
+          # not the virtual network.
+          for serial in emulator-5554 emulator-5556; do
+            adb -s $serial shell "ip link set wlan0 down" 2>&1 || true
+            adb -s $serial shell "ip link set radio0 down" 2>&1 || true
+          done
+
+          # Give the network stack time to stabilize after interface changes
+          sleep 5
+
           echo "=== Final state ==="
           adb -s emulator-5554 shell ip addr
           adb -s emulator-5556 shell ip addr

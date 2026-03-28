@@ -286,20 +286,9 @@ class NsdDiscoveryTest {
         )
         assertNotNull("[TCP] Resolve should succeed, got error: $resolveError", resolvedInfo)
 
-        val resolvedHost = resolvedInfo!!.host
+        val host = resolvedInfo!!.host
         val port = resolvedInfo!!.port
-
-        // The mDNS daemon may return an unusable address (IPv6 link-local or SLIRP IP).
-        // Check the TXT record for an explicit routable address.
-        val txtAddress = resolvedInfo!!.attributes["address"]?.let { String(it) }
-        val host = if (txtAddress != null) {
-            Log.i(TAG, "[TCP] Using TXT record address: $txtAddress (resolved was: $resolvedHost)")
-            java.net.InetAddress.getByName(txtAddress)
-        } else {
-            Log.i(TAG, "[TCP] No TXT address, using resolved: $resolvedHost")
-            resolvedHost
-        }
-        Log.i(TAG, "[TCP] Connecting to $host:$port")
+        Log.i(TAG, "[TCP] Resolved to $host:$port")
 
         // Step 3: Make TCP connection and exchange data
         try {

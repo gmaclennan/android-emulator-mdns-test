@@ -7,9 +7,6 @@ import android.os.Bundle
 import android.util.Log
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import java.net.Inet4Address
-import java.net.InetAddress
-import java.net.NetworkInterface
 import java.net.ServerSocket
 import kotlin.concurrent.thread
 
@@ -37,11 +34,10 @@ class MainActivity : AppCompatActivity() {
         val statusText = findViewById<TextView>(R.id.statusText)
         val logText = findViewById<TextView>(R.id.logText)
 
-        // Create a real listening socket — NSD requires a valid port
         serverSocket = ServerSocket(0)
         val port = serverSocket!!.localPort
 
-        // Accept TCP connections and echo back with a prefix
+        // Echo server: accept TCP connections and respond with "ECHO:" prefix
         thread(isDaemon = true) {
             Log.i(TAG, "Echo server listening on port $port")
             while (!serverSocket!!.isClosed) {
@@ -69,22 +65,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Find a routable IPv4 address on the shared network interface
-        // Prefer 192.168.77.x (the shared subnet), fall back to any non-loopback IPv4
-        val hostAddress = findSharedAddress()
-        Log.i(TAG, "Using host address: $hostAddress")
-
+        // Standard NSD registration — no test-specific workarounds
         val serviceInfo = NsdServiceInfo().apply {
             this.serviceName = serviceName
             serviceType = SERVICE_TYPE
             this.port = port
-            if (hostAddress != null) {
-                host = hostAddress
-                // Also put the address in a TXT record as a fallback,
-                // since setHost() may be ignored by the mDNS daemon
-                setAttribute("address", hostAddress.hostAddress)
-                Log.i(TAG, "Set TXT record address=${hostAddress.hostAddress}")
-            }
         }
 
         nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
@@ -117,25 +102,6 @@ class MainActivity : AppCompatActivity() {
 
         Log.i(TAG, "Registering service: $serviceName type=$SERVICE_TYPE port=$port")
         nsdManager?.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
-    }
-
-    private fun findSharedAddress(): InetAddress? {
-        var fallback: InetAddress? = null
-        for (iface in NetworkInterface.getNetworkInterfaces()) {
-            for (addr in iface.inetAddresses) {
-                if (addr.isLoopbackAddress || addr !is Inet4Address) continue
-                // Prefer the shared subnet used by our CI setup
-                if (addr.hostAddress?.startsWith("192.168.77.") == true) {
-                    Log.i(TAG, "Found shared subnet address: ${addr.hostAddress} on ${iface.name}")
-                    return addr
-                }
-                if (fallback == null) {
-                    fallback = addr
-                }
-            }
-        }
-        Log.i(TAG, "No shared subnet address found, fallback: ${fallback?.hostAddress}")
-        return fallback
     }
 
     override fun onDestroy() {
