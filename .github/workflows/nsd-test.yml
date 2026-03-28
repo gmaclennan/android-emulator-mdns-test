@@ -45,11 +45,7 @@ jobs:
           ram-size: 4096M
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
-          script: |
-            ./gradlew connectedDebugAndroidTest \
-              -Pandroid.testInstrumentationRunnerArguments.class=com.example.nsdtest.NsdDiscoveryTest#nsdRegistrationWorks,com.example.nsdtest.NsdDiscoveryTest#nsdDiscoveryStarts
-            echo "=== NSD logs ==="
-            adb logcat -d -s NsdTest:* NsdDiscoveryTest:* | tail -30
+          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.example.nsdtest.NsdDiscoveryTest#nsdRegistrationWorks,com.example.nsdtest.NsdDiscoveryTest#nsdDiscoveryStarts
 
   # Job 2: Two emulators with TAP bridge networking for cross-emulator mDNS
   cross-emulator-tap:
