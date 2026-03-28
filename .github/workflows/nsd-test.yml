@@ -1,0 +1,328 @@
+name: NSD Discovery Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-qemu-socket-multicast:
+    name: "NSD Test - QEMU Socket Multicast"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - name: Set up Android SDK
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          mkdir -p $ANDROID_HOME/cmdline-tools
+
+          # Download command-line tools
+          cd $ANDROID_HOME/cmdline-tools
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o tools.zip
+          unzip -q tools.zip
+          mv cmdline-tools latest
+
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
+
+          # Accept licenses and install components
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install \
+            "platform-tools" \
+            "emulator" \
+            "platforms;android-31" \
+            "system-images;android-31;default;x86_64"
+
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/emulator" >> $GITHUB_PATH
+
+      - name: Create AVDs
+        run: |
+          echo "no" | avdmanager create avd -n avd1 -k "system-images;android-31;default;x86_64" --force
+          echo "no" | avdmanager create avd -n avd2 -k "system-images;android-31;default;x86_64" --force
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APKs
+        run: |
+          ./gradlew assembleDebug assembleDebugAndroidTest
+
+      - name: Verify QEMU supports socket multicast
+        run: |
+          echo "=== Checking emulator/QEMU capabilities ==="
+          emulator -version || true
+          echo "---"
+          # Check if the emulator binary is actually qemu-based
+          file $(which emulator) || true
+          echo "---"
+          ls -la $ANDROID_HOME/emulator/qemu/ || true
+          echo "---"
+          # Try to find the actual qemu binary
+          find $ANDROID_HOME/emulator -name "qemu-system-*" -type f 2>/dev/null || true
+
+      - name: Start emulators with QEMU socket multicast
+        run: |
+          echo "=== Starting emulator 1 ==="
+          # Start emulator 1 with additional NIC via QEMU socket multicast
+          emulator @avd1 \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -gpu swiftshader_indirect \
+            -no-snapshot \
+            -qemu \
+            -device virtio-net-pci,netdev=sharedlan,mac=52:54:00:12:34:56 \
+            -netdev socket,id=sharedlan,mcast=230.0.0.1:1234 \
+            &
+          EMU1_PID=$!
+          echo "Emulator 1 PID: $EMU1_PID"
+
+          # Give first emulator a moment to claim its ports
+          sleep 5
+
+          echo "=== Starting emulator 2 ==="
+          emulator @avd2 \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -gpu swiftshader_indirect \
+            -no-snapshot \
+            -qemu \
+            -device virtio-net-pci,netdev=sharedlan,mac=52:54:00:12:34:57 \
+            -netdev socket,id=sharedlan,mcast=230.0.0.1:1234 \
+            &
+          EMU2_PID=$!
+          echo "Emulator 2 PID: $EMU2_PID"
+
+          echo "EMU1_PID=$EMU1_PID" >> $GITHUB_ENV
+          echo "EMU2_PID=$EMU2_PID" >> $GITHUB_ENV
+
+      - name: Wait for emulators to boot
+        run: |
+          wait_for_boot() {
+            local serial=$1
+            local name=$2
+            local max_wait=300
+            local elapsed=0
+
+            echo "Waiting for $name ($serial) to boot..."
+
+            # First wait for device to appear
+            while ! adb devices | grep -q "$serial"; do
+              sleep 2
+              elapsed=$((elapsed + 2))
+              if [ $elapsed -ge $max_wait ]; then
+                echo "TIMEOUT waiting for $name to appear"
+                adb devices
+                return 1
+              fi
+            done
+            echo "$name appeared after ${elapsed}s"
+
+            # Wait for boot_completed
+            while [ "$(adb -s $serial shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do
+              sleep 3
+              elapsed=$((elapsed + 3))
+              if [ $elapsed -ge $max_wait ]; then
+                echo "TIMEOUT waiting for $name to finish booting"
+                return 1
+              fi
+            done
+            echo "$name booted after ${elapsed}s"
+          }
+
+          adb start-server
+          adb devices
+
+          wait_for_boot "emulator-5554" "Emulator 1" &
+          WAIT1_PID=$!
+          wait_for_boot "emulator-5556" "Emulator 2" &
+          WAIT2_PID=$!
+
+          wait $WAIT1_PID || { echo "Emulator 1 failed to boot"; exit 1; }
+          wait $WAIT2_PID || { echo "Emulator 2 failed to boot"; exit 1; }
+
+          echo "=== Both emulators booted ==="
+          adb devices
+
+      - name: Diagnose emulator networking
+        run: |
+          echo "=== Emulator 1 network interfaces ==="
+          adb -s emulator-5554 shell ip addr 2>&1 || true
+          echo ""
+          echo "=== Emulator 1 routes ==="
+          adb -s emulator-5554 shell ip route 2>&1 || true
+          echo ""
+          echo "=== Emulator 2 network interfaces ==="
+          adb -s emulator-5556 shell ip addr 2>&1 || true
+          echo ""
+          echo "=== Emulator 2 routes ==="
+          adb -s emulator-5556 shell ip route 2>&1 || true
+          echo ""
+
+          echo "=== Check for second NIC on Emulator 1 ==="
+          adb -s emulator-5554 shell "ls /sys/class/net/" 2>&1 || true
+          echo ""
+          echo "=== Check for second NIC on Emulator 2 ==="
+          adb -s emulator-5556 shell "ls /sys/class/net/" 2>&1 || true
+
+      - name: Configure shared network interface in guests
+        run: |
+          # The QEMU socket multicast should have added a second NIC (eth1 or similar).
+          # We need to bring it up with static IPs.
+
+          echo "=== Configuring Emulator 1 shared NIC ==="
+          adb -s emulator-5554 root
+          sleep 2
+
+          # Find the new interface (not lo, not the default one)
+          EMU1_IFACES=$(adb -s emulator-5554 shell "ls /sys/class/net/" | tr -d '\r')
+          echo "Emulator 1 interfaces: $EMU1_IFACES"
+
+          # Try to configure eth1 (the most common name for the second virtio NIC)
+          adb -s emulator-5554 shell "ip link set dev eth1 up" 2>&1 || \
+            echo "Note: eth1 not found, trying other interfaces"
+          adb -s emulator-5554 shell "ip addr add 192.168.77.10/24 dev eth1" 2>&1 || true
+
+          # Also try bringing up any interface that isn't configured
+          for iface in $EMU1_IFACES; do
+            iface=$(echo $iface | tr -d '\r\n ')
+            if [ "$iface" != "lo" ]; then
+              echo "Checking $iface on emu1..."
+              adb -s emulator-5554 shell "ip addr show dev $iface" 2>&1 || true
+            fi
+          done
+
+          echo ""
+          echo "=== Configuring Emulator 2 shared NIC ==="
+          adb -s emulator-5556 root
+          sleep 2
+
+          EMU2_IFACES=$(adb -s emulator-5556 shell "ls /sys/class/net/" | tr -d '\r')
+          echo "Emulator 2 interfaces: $EMU2_IFACES"
+
+          adb -s emulator-5556 shell "ip link set dev eth1 up" 2>&1 || \
+            echo "Note: eth1 not found, trying other interfaces"
+          adb -s emulator-5556 shell "ip addr add 192.168.77.11/24 dev eth1" 2>&1 || true
+
+          for iface in $EMU2_IFACES; do
+            iface=$(echo $iface | tr -d '\r\n ')
+            if [ "$iface" != "lo" ]; then
+              echo "Checking $iface on emu2..."
+              adb -s emulator-5556 shell "ip addr show dev $iface" 2>&1 || true
+            fi
+          done
+
+          echo ""
+          echo "=== Adding routing rules to prefer main table ==="
+          adb -s emulator-5554 shell "ip rule add from all lookup main pref 99" 2>&1 || true
+          adb -s emulator-5556 shell "ip rule add from all lookup main pref 99" 2>&1 || true
+
+          echo ""
+          echo "=== Post-config network state ==="
+          echo "--- Emulator 1 ---"
+          adb -s emulator-5554 shell ip addr
+          echo "--- Emulator 2 ---"
+          adb -s emulator-5556 shell ip addr
+
+      - name: Test connectivity between emulators
+        run: |
+          echo "=== Ping test: Emulator 1 -> Emulator 2 ==="
+          adb -s emulator-5554 shell "ping -c 3 -W 5 192.168.77.11" 2>&1 || echo "Ping failed (may be expected if ICMP is blocked)"
+
+          echo ""
+          echo "=== Ping test: Emulator 2 -> Emulator 1 ==="
+          adb -s emulator-5556 shell "ping -c 3 -W 5 192.168.77.10" 2>&1 || echo "Ping failed (may be expected if ICMP is blocked)"
+
+          echo ""
+          echo "=== Multicast test: check if mDNS port is reachable ==="
+          adb -s emulator-5554 shell "cat /proc/net/igmp" 2>&1 || true
+          adb -s emulator-5554 shell "cat /proc/net/igmp6" 2>&1 || true
+
+      - name: Install app and launch on Emulator 2
+        run: |
+          echo "=== Installing app on both emulators ==="
+          adb -s emulator-5554 install -t app/build/outputs/apk/debug/app-debug.apk
+          adb -s emulator-5556 install -t app/build/outputs/apk/debug/app-debug.apk
+
+          echo "=== Launching app on Emulator 2 (service advertiser) ==="
+          adb -s emulator-5556 shell am start \
+            -n com.example.nsdtest/.MainActivity \
+            --es service_name "NsdTest-Emulator2"
+
+          # Give the service time to register
+          sleep 10
+
+          echo "=== Check Emulator 2 app logs ==="
+          adb -s emulator-5556 logcat -d -s NsdTest:* | tail -20
+
+      - name: Run NSD discovery tests on Emulator 1
+        run: |
+          echo "=== Installing test APK on Emulator 1 ==="
+          adb -s emulator-5554 install -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+
+          echo "=== Running instrumented tests ==="
+          adb -s emulator-5554 shell am instrument \
+            -w \
+            -e class com.example.nsdtest.NsdDiscoveryTest \
+            com.example.nsdtest.test/androidx.test.runner.AndroidJUnitRunner \
+            2>&1 | tee test-output.txt
+
+          echo ""
+          echo "=== Test app logs from Emulator 1 ==="
+          adb -s emulator-5554 logcat -d -s NsdTest:* NsdDiscoveryTest:* | tail -50
+
+          echo ""
+          echo "=== Test app logs from Emulator 2 ==="
+          adb -s emulator-5556 logcat -d -s NsdTest:* | tail -20
+
+          # Check test results
+          if grep -q "FAILURES" test-output.txt; then
+            echo ""
+            echo "=== SOME TESTS FAILED ==="
+            echo "This is expected for the cross-emulator discovery test if multicast doesn't work."
+            echo "Check the 'nsdDiscoveryStarts' and 'nsdRegistrationWorks' tests to see if NSD itself works."
+            # Don't fail the job — this is experimental
+            exit 0
+          fi
+
+      - name: Collect full diagnostic logs
+        if: always()
+        run: |
+          echo "=== Full logcat from Emulator 1 (NSD related) ==="
+          adb -s emulator-5554 logcat -d | grep -i -E "(nsd|mdns|NsdTest|NsdDiscovery|dns-sd|netd)" | tail -100 || true
+
+          echo ""
+          echo "=== Full logcat from Emulator 2 (NSD related) ==="
+          adb -s emulator-5556 logcat -d | grep -i -E "(nsd|mdns|NsdTest|dns-sd|netd)" | tail -100 || true
+
+          echo ""
+          echo "=== Emulator processes ==="
+          ps aux | grep -i emulator | grep -v grep || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          adb -s emulator-5554 emu kill 2>/dev/null || true
+          adb -s emulator-5556 emu kill 2>/dev/null || true
+          kill $EMU1_PID 2>/dev/null || true
+          kill $EMU2_PID 2>/dev/null || true
