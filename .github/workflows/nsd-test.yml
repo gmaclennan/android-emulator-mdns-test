@@ -145,12 +145,9 @@ jobs:
         run: |
           adb -s emulator-5554 root; adb -s emulator-5556 root; sleep 3
 
-          # Find the TAP-backed interface (wlan0, not dummy0)
-          EMU1_IFACE=$(adb -s emulator-5554 shell "ip -o link show | grep -v -E 'lo|dummy' | head -1 | awk '{print \$2}'" | tr -d ':\r\n ')
-          EMU2_IFACE=$(adb -s emulator-5556 shell "ip -o link show | grep -v -E 'lo|dummy' | head -1 | awk '{print \$2}'" | tr -d ':\r\n ')
-          # Fallback to wlan0 if grep didn't find anything
-          [ -z "$EMU1_IFACE" ] && EMU1_IFACE="wlan0"
-          [ -z "$EMU2_IFACE" ] && EMU2_IFACE="wlan0"
+          # -net-tap replaces the wifi backend, so wlan0 is the TAP-backed interface
+          EMU1_IFACE="wlan0"
+          EMU2_IFACE="wlan0"
           echo "Interfaces: emu1=$EMU1_IFACE emu2=$EMU2_IFACE"
 
           # Fix MAC conflict on emu2
