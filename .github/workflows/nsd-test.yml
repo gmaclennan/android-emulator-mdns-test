@@ -336,8 +336,14 @@ jobs:
           # Give the NSD service time to register
           sleep 15
 
+          echo "=== Verify activity is running on Emulator 2 ==="
+          adb -s emulator-5556 shell "dumpsys activity activities | grep -A 2 nsdtest" || true
+
           echo "=== Emulator 2 NSD logs ==="
           adb -s emulator-5556 logcat -d -s NsdTest:* | tail -20
+
+          echo "=== Emulator 2 crash/error logs ==="
+          adb -s emulator-5556 logcat -d | grep -iE "(nsdtest|AndroidRuntime|FATAL|IllegalState)" | tail -30 || true
 
       - name: Run NSD discovery tests
         run: |
