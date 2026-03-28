@@ -52,6 +52,8 @@ jobs:
     name: "Cross-Emulator NSD - TAP Bridge"
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      ANDROID_AVD_HOME: /home/runner/.android/avd
 
     steps:
       - uses: actions/checkout@v4
@@ -89,6 +91,13 @@ jobs:
         run: |
           echo "no" | avdmanager create avd -n avd1 -k "system-images;android-30;default;x86_64" --force
           echo "no" | avdmanager create avd -n avd2 -k "system-images;android-30;default;x86_64" --force
+          echo "=== Verify AVDs ==="
+          emulator -list-avds
+          echo "=== AVD search paths ==="
+          echo "ANDROID_AVD_HOME=${ANDROID_AVD_HOME:-unset}"
+          echo "ANDROID_SDK_HOME=${ANDROID_SDK_HOME:-unset}"
+          echo "HOME=$HOME"
+          find / -name "avd1.ini" 2>/dev/null || true
 
       - name: Setup TAP bridge
         run: |
@@ -397,6 +406,8 @@ jobs:
     name: "Cross-Emulator NSD - QEMU Socket"
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      ANDROID_AVD_HOME: /home/runner/.android/avd
 
     steps:
       - uses: actions/checkout@v4
@@ -434,6 +445,9 @@ jobs:
         run: |
           echo "no" | avdmanager create avd -n avd1 -k "system-images;android-30;default;x86_64" --force
           echo "no" | avdmanager create avd -n avd2 -k "system-images;android-30;default;x86_64" --force
+          echo "=== Verify AVDs ==="
+          emulator -list-avds
+          find / -name "avd1.ini" 2>/dev/null || true
 
       - name: Check QEMU capabilities
         run: |
