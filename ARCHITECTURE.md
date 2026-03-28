@@ -11,22 +11,25 @@ This document describes an architecture for testing NSD (Network Service Discove
 - Emulator 2 advertising a service
 - Emulator 1 discovering and connecting to it
 - Both running simultaneously with coordinated timing
-- Combined test results at the end
 
-## Solution: Parallel Harness Runners
+## Solution: Harness + App Launch
 
-Define two runners in the harness config, each targeting a different emulator. Run them in parallel from the CI workflow, with each executing a different test file.
+Run `react-native-harness` on **one** emulator (the discoverer) and simply launch the RN app on the other emulator via `adb shell am start` (the advertiser).
+
+This avoids a key limitation: two simultaneous harness instances would conflict on the WebSocket bridge port (`3001` by default) on the host. Since `react-native-harness` communicates with the device over a WebSocket bridge (using `adb reverse` for port forwarding), running two instances requires different ports and configs — unnecessary complexity.
+
+The simpler approach is also more realistic: one device advertises a service (just by running the app), the other runs test assertions against the discovery flow.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  GitHub Actions Runner                                          │
 │                                                                 │
 │  ┌──────────────────────┐     ┌──────────────────────┐         │
-│  │ Harness (Jest) #1    │     │ Harness (Jest) #2    │         │
-│  │ discover.test.ts     │     │ advertise.test.ts    │         │
-│  │ --harnessRunner emu1 │     │ --harnessRunner emu2 │         │
+│  │ Harness (Jest)       │     │ adb shell am start   │         │
+│  │ discover.test.ts     │     │ (launches RN app)    │         │
+│  │ --harnessRunner emu1 │     │                      │         │
 │  └──────────┬───────────┘     └──────────┬───────────┘         │
-│             │ WebSocket                   │ WebSocket            │
+│             │ WebSocket + adb reverse     │ Just running        │
 │  ┌──────────▼───────────┐     ┌──────────▼───────────┐         │
 │  │ Emulator 1 (avd1)    │     │ Emulator 2 (avd2)    │         │
 │  │ emulator-5554        │     │ emulator-5556        │         │
@@ -35,20 +38,41 @@ Define two runners in the harness config, each targeting a different emulator. R
 │  │                      │ QEMU│                      │         │
 │  │ Discovers service    │mcast│ Advertises service   │         │
 │  │ Resolves host:port   │     │ Runs TCP echo server │         │
-│  │ TCP connects + data  │     │                      │         │
+│  │ TCP connects + data  │     │ (via react-native-   │         │
+│  │                      │     │  zeroconf + tcp-sock) │         │
 │  └──────────────────────┘     └──────────────────────┘         │
 │                                                                 │
 │  QEMU Socket Multicast (230.0.0.1:1234) — shared L2 segment    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Why not two harness instances?
+
+`react-native-harness` uses a WebSocket bridge (default port 3001) and `adb reverse` to communicate between the host and device. Running two harness instances simultaneously would require:
+
+- Different `webSocketPort` values per instance
+- Separate config files (the port is a global config, not per-runner)
+- Coordination to avoid Metro port conflicts
+
+This adds complexity for no real benefit. The advertise side doesn't need test assertions — it just needs to run the app. Our prototype proved this works with a simple `adb shell am start`.
+
+### How `adb reverse` works with QEMU socket multicast
+
+`adb reverse tcp:8081 tcp:8081` creates a tunnel from the device to the host through the ADB channel. This operates via the emulator console port (host-local TCP), **not** through the emulator's virtual network. Disabling SLIRP (`wlan0`/`radio0`) does not affect:
+
+- `adb` commands (including `adb shell`, `adb install`)
+- `adb reverse` port forwarding (used by Metro and harness bridge)
+- `adb forward` port forwarding
+
+This means `react-native-harness` works normally on emu1 even though SLIRP is disabled — Metro bundling, WebSocket bridge, and all test communication flow through ADB.
+
 ## Project Structure
 
 ```
 src/
-  main.tsx                        # App entry point (minimal, needed by harness)
+  main.tsx                        # App entry point
+  App.tsx                         # App component — publishes NSD + runs echo server
 tests/
-  advertise.test.ts               # Runs on emu2: publish service, keep alive
   discover.test.ts                # Runs on emu1: discover, resolve, TCP connect
 rn-harness.config.mjs
 jest.harness.config.mjs
@@ -75,14 +99,9 @@ export default {
       device: androidEmulator('avd1'),
       bundleId: 'com.nsdtest',
     }),
-    androidPlatform({
-      name: 'emu2',
-      device: androidEmulator('avd2'),
-      bundleId: 'com.nsdtest',
-    }),
   ],
-  bridgeTimeout: 120_000,         // generous timeout for CI
-  forwardClientLogs: true,        // see device logs in CI output
+  bridgeTimeout: 120_000,
+  forwardClientLogs: true,
 };
 ```
 
@@ -91,78 +110,133 @@ export default {
 ```js
 export default {
   preset: 'react-native-harness/jest-preset',
-  testTimeout: 180_000,           // 3min per test (discovery has 120s timeout)
+  testTimeout: 180_000,
 };
 ```
 
-## Test Files
+## App Code (runs on both emulators)
 
-### `tests/advertise.test.ts` — runs on emu2
+The same RN app is installed on both emulators. On emu2, it's launched via `adb shell am start` and simply runs — publishing an NSD service and accepting TCP connections. On emu1, the harness injects tests that use `react-native-zeroconf` to discover and connect.
 
-```ts
-import { describe, it, expect } from 'react-native-harness';
+### `src/App.tsx`
+
+```tsx
+import React, { useEffect } from 'react';
+import { View, Text } from 'react-native';
 import Zeroconf from 'react-native-zeroconf';
+import TcpSocket from 'react-native-tcp-socket';
 
-describe('NSD Advertise', () => {
-  it('registers a discoverable service and keeps it alive', async () => {
-    const zeroconf = new Zeroconf();
+export default function App() {
+  useEffect(() => {
+    // Start TCP echo server
+    const server = TcpSocket.createServer((socket) => {
+      socket.on('data', (data) => {
+        socket.write('ECHO:' + data.toString());
+      });
+    }).listen({ port: 0, host: '0.0.0.0' });
 
-    const published = new Promise<void>((resolve, reject) => {
-      zeroconf.on('published', () => resolve());
-      zeroconf.on('error', (err) => reject(err));
+    server.on('listening', () => {
+      const port = server.address()?.port;
+      if (!port) return;
+
+      // Publish NSD service on the actual listening port
+      const zeroconf = new Zeroconf();
+      zeroconf.publishService('nsdtest', 'tcp', 'local.', 'TestService', port, {
+        version: '1',
+      });
     });
 
-    // Publish on port 12345 — for TCP tests, you'd also start
-    // a server here using react-native-tcp-socket
-    zeroconf.publishService('nsdtest', 'tcp', 'local.', 'TestService-Emu2', 12345, {
-      version: '1',
-    });
+    return () => { server.close(); };
+  }, []);
 
-    await published;
-
-    // Keep the service alive long enough for the discover test to find it.
-    // The discover test has a 120s timeout, so 90s of alive time is sufficient
-    // since both tests start within seconds of each other.
-    await new Promise((resolve) => setTimeout(resolve, 90_000));
-
-    zeroconf.unpublishService('TestService-Emu2');
-    zeroconf.removeDeviceListeners();
-  }, 120_000);
-});
+  return (
+    <View><Text>NSD Test — Advertising Service</Text></View>
+  );
+}
 ```
 
-### `tests/discover.test.ts` — runs on emu1
+## Test File
+
+### `tests/discover.test.ts` — runs on emu1 via harness
 
 ```ts
 import { describe, it, expect, harness } from 'react-native-harness';
 import Zeroconf from 'react-native-zeroconf';
 
-describe('NSD Discover', () => {
-  it('discovers a service from another emulator', async () => {
+describe('NSD Cross-Emulator Discovery', () => {
+  it('discovers a service advertised by another emulator', async () => {
     const zeroconf = new Zeroconf();
 
-    const resolved = await harness.waitFor(() => {
-      return new Promise<any>((resolve, reject) => {
-        zeroconf.on('resolved', (service) => {
-          if (service.name.includes('Emu2')) {
-            resolve(service);
-          }
-        });
-        zeroconf.on('error', reject);
-        zeroconf.scan('nsdtest', 'tcp', 'local.');
+    const service = await new Promise<any>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        zeroconf.stop();
+        reject(new Error('Discovery timed out after 120s'));
+      }, 120_000);
+
+      zeroconf.on('resolved', (svc) => {
+        if (svc.name.includes('TestService')) {
+          clearTimeout(timeout);
+          zeroconf.stop();
+          resolve(svc);
+        }
       });
-    }, { timeout: 120_000, interval: 5_000 });
+      zeroconf.on('error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+      zeroconf.scan('nsdtest', 'tcp', 'local.');
+    });
 
-    expect(resolved).toBeDefined();
-    expect(resolved.name).toContain('Emu2');
-    expect(resolved.port).toBe(12345);
-    expect(resolved.addresses.length).toBeGreaterThan(0);
-    // The resolved address should be on the shared 192.168.77.x subnet
-    expect(
-      resolved.addresses.some((a: string) => a.startsWith('192.168.77.'))
-    ).toBe(true);
+    expect(service).toBeDefined();
+    expect(service.name).toContain('TestService');
+    expect(service.port).toBeGreaterThan(0);
+    expect(service.addresses.length).toBeGreaterThan(0);
 
-    zeroconf.stop();
+    // Verify the resolved address is on the shared subnet
+    const sharedAddr = service.addresses.find(
+      (a: string) => a.startsWith('192.168.77.')
+    );
+    expect(sharedAddr).toBeDefined();
+
+    zeroconf.removeDeviceListeners();
+  }, 180_000);
+
+  it('makes a TCP connection to the discovered service', async () => {
+    const zeroconf = new Zeroconf();
+    const TcpSocket = require('react-native-tcp-socket');
+
+    // Discover
+    const service = await new Promise<any>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timeout')), 120_000);
+      zeroconf.on('resolved', (svc) => {
+        if (svc.name.includes('TestService')) {
+          clearTimeout(timeout);
+          zeroconf.stop();
+          resolve(svc);
+        }
+      });
+      zeroconf.scan('nsdtest', 'tcp', 'local.');
+    });
+
+    // Connect and exchange data
+    const sharedAddr = service.addresses.find(
+      (a: string) => a.startsWith('192.168.77.')
+    );
+
+    const response = await new Promise<string>((resolve, reject) => {
+      const client = TcpSocket.createConnection(
+        { host: sharedAddr, port: service.port },
+        () => { client.write('hello-from-emu1'); }
+      );
+      client.on('data', (data: Buffer) => {
+        resolve(data.toString());
+        client.destroy();
+      });
+      client.on('error', reject);
+    });
+
+    expect(response).toBe('ECHO:hello-from-emu1');
+
     zeroconf.removeDeviceListeners();
   }, 180_000);
 });
@@ -214,6 +288,10 @@ jobs:
           echo "no" | avdmanager create avd -n avd2 \
             -k "system-images;android-30;default;x86_64" --force
 
+      - name: Build Android app
+        run: |
+          cd android && ./gradlew assembleDebug
+
       - name: Start emulators with QEMU socket multicast
         run: |
           emulator @avd1 -no-window -no-audio -no-boot-anim \
@@ -251,102 +329,37 @@ jobs:
           done
           sleep 5
 
-      - name: Run NSD tests in parallel
+      - name: Install app on emu2 and launch (advertiser)
         run: |
-          # Run advertise test on emu2 (background)
-          npx react-native-harness --harnessRunner emu2 \
-            --json --outputFile /tmp/emu2-results.json \
-            tests/advertise.test.ts &
-          EMU2_PID=$!
-
-          # Give emu2 a moment to start publishing
+          adb -s emulator-5556 install app/build/outputs/apk/debug/app-debug.apk
+          adb -s emulator-5556 shell am start -n com.nsdtest/.MainActivity
           sleep 10
 
-          # Run discover test on emu1 (foreground)
-          npx react-native-harness --harnessRunner emu1 \
-            --json --outputFile /tmp/emu1-results.json \
-            tests/discover.test.ts
-          EMU1_EXIT=$?
+          # Verify the service is registered
+          adb -s emulator-5556 logcat -d -s NsdTest:* | tail -10
 
-          # Wait for emu2's advertise test to finish
-          wait $EMU2_PID
-          EMU2_EXIT=$?
-
-          # Report results
-          echo "=== Emu1 (discover) exit: $EMU1_EXIT ==="
-          cat /tmp/emu1-results.json 2>/dev/null \
-            | jq '.testResults[].testResults[] | {name: .title, status: .status}' \
-            || true
-          echo "=== Emu2 (advertise) exit: $EMU2_EXIT ==="
-          cat /tmp/emu2-results.json 2>/dev/null \
-            | jq '.testResults[].testResults[] | {name: .title, status: .status}' \
-            || true
-
-          # Fail if either test failed
-          [ $EMU1_EXIT -eq 0 ] && [ $EMU2_EXIT -eq 0 ]
+      - name: Run discovery tests on emu1 via harness
+        run: |
+          npx react-native-harness --harnessRunner emu1 tests/discover.test.ts
 ```
 
 ## Coordination Strategy
 
-No explicit coordination mechanism is needed because the timing works naturally:
+No explicit coordination mechanism is needed:
 
-1. Both harness processes start within seconds
-2. The **advertise test** registers a service immediately (<1s) and then sleeps for 90s
-3. The **discover test** scans with a 120s timeout — plenty of time to find the service
-4. Discovery happens in <2s once both are running (proven in our prototype)
-
-The 10-second `sleep` between starting emu2 and emu1 provides a buffer, but even without it, the 120s discovery timeout handles any startup variance.
+1. The **app on emu2** is launched via `adb shell am start` and registers its NSD service immediately (<1s)
+2. The **harness on emu1** starts after a 10-second buffer and runs the discover test with a 120s timeout
+3. Discovery happens in <2s once both are running (proven in our prototype)
 
 ```
 Timeline:
-  t=0s    CI starts emu2 harness (advertise.test.ts)
-  t=1s    Emu2 publishes NSD service
-  t=10s   CI starts emu1 harness (discover.test.ts)
-  t=11s   Emu1 starts scanning, discovers Emu2's service
-  t=12s   Emu1 resolves service, gets 192.168.77.11:12345
-  t=12s   Emu1 connects via TCP, exchanges data — PASS
-  t=90s   Emu2's keep-alive timer expires, unpublishes — PASS
-```
-
-## Extending with TCP Connection Testing
-
-To test TCP connections after discovery (the full NSD workflow), add `react-native-tcp-socket`:
-
-### In `tests/advertise.test.ts`
-
-```ts
-import TcpSocket from 'react-native-tcp-socket';
-
-// Start echo server before publishing
-const server = TcpSocket.createServer((socket) => {
-  socket.on('data', (data) => {
-    socket.write('ECHO:' + data.toString());
-  });
-}).listen({ port: 12345, host: '0.0.0.0' });
-
-// Then publish the NSD service as before
-zeroconf.publishService('nsdtest', 'tcp', 'local.', 'TestService-Emu2', 12345);
-```
-
-### In `tests/discover.test.ts`
-
-```ts
-import TcpSocket from 'react-native-tcp-socket';
-
-// After discovery and resolution...
-const response = await new Promise<string>((resolve, reject) => {
-  const client = TcpSocket.createConnection(
-    { host: resolved.addresses[0], port: resolved.port },
-    () => { client.write('hello-from-emu1'); }
-  );
-  client.on('data', (data) => {
-    resolve(data.toString());
-    client.destroy();
-  });
-  client.on('error', reject);
-});
-
-expect(response).toBe('ECHO:hello-from-emu1');
+  t=0s    CI installs app on emu2, launches it
+  t=1s    Emu2 publishes NSD service + starts TCP echo server
+  t=10s   CI starts harness on emu1 (discover.test.ts)
+  t=15s   Harness boots, test begins scanning
+  t=16s   Emu1 discovers Emu2's service
+  t=16s   Emu1 resolves → 192.168.77.11:PORT
+  t=16s   Emu1 connects via TCP, exchanges data — PASS
 ```
 
 ## Emulator Networking Setup (from prototype findings)
@@ -365,42 +378,38 @@ The mDNS daemon (mDNSResponder on API 30) advertises on **all active interfaces*
 
 This is purely infrastructure setup — the app code uses standard `react-native-zeroconf` APIs with no workarounds.
 
-### Why not TAP bridge?
+### Does `adb reverse` still work?
 
-We tested both approaches:
+Yes. `adb reverse` operates through the ADB channel (emulator console port), not through the virtual network. Disabling SLIRP does not affect:
 
-| | QEMU Socket Multicast | TAP Bridge (`-net-tap`) |
-|---|---|---|
-| mDNS Discovery | PASS | PASS |
-| TCP Connection | PASS | FAIL (timeout) |
-| Root required | No | Yes |
-| Host setup | None | TAP + bridge |
-| Recommended | **Yes** | No |
+- `adb` commands (`adb shell`, `adb install`, `adb logcat`)
+- `adb reverse` port forwarding (used by Metro bundler and react-native-harness bridge)
+- `adb forward` port forwarding
 
-The TAP bridge approach works for mDNS discovery but fails for TCP — the wifi driver (`wlan0`) doesn't properly accept static IP reconfiguration.
+The react-native-harness WebSocket bridge and Metro bundler connection both flow through `adb reverse`, which is unaffected by the virtual network configuration.
 
 ## Key Technical Findings
 
 These findings come from the [prototype testing](https://github.com/gmaclennan/android-emulator-mdns-test/pull/1):
 
-1. **`NsdServiceInfo.setHost()` is ignored on registration** (API 30). The `host` field in `MDnsSdListener.cpp` is hardcoded to `NULL`. Fixed in API 34 with `setHostAddresses()`.
+1. **`NsdServiceInfo.setHost()` is ignored on registration** (API 30). In `MDnsSdListener.cpp`, the `host` parameter is hardcoded to `NULL` when calling `DNSServiceRegister()`. Fixed in API 34 with `setHostAddresses()`.
 
-2. **Android NSD discovers across all interfaces**, including secondary NICs not managed by `ConnectivityService`. The mDNSResponder daemon operates at the Linux socket layer, not through Android's network abstraction.
+2. **mDNSResponder advertises on all active interfaces** that are UP and not point-to-point. It enumerates interfaces via Netlink and operates at the Linux socket level, independent of Android's `ConnectivityService`.
 
-3. **QEMU socket multicast is undocumented but works** with the Android emulator's QEMU fork. The `socket,mcast` netdev backend is the most CI-friendly approach.
+3. **Android NSD discovers across all interfaces**, including secondary NICs not managed by `ConnectivityService`. The mDNSResponder daemon doesn't require a formal Android `Network` object.
 
-4. **AVD path on GitHub Actions**: `avdmanager` creates AVDs at `~/.config/.android/avd/` (XDG convention). Set `ANDROID_AVD_HOME` explicitly.
+4. **QEMU socket multicast is undocumented but works** with the Android emulator's QEMU fork. The `socket,mcast` netdev backend is the most CI-friendly approach — no root, no host network setup.
 
-5. **ADB is unaffected by virtual network changes**. ADB connects through the emulator console port (host-local TCP), not through the emulator's virtual network. Disabling SLIRP or adding NICs doesn't break adb.
+5. **AVD path on GitHub Actions**: `avdmanager` creates AVDs at `~/.config/.android/avd/` (XDG convention). Set `ANDROID_AVD_HOME` explicitly.
+
+6. **ADB is unaffected by virtual network changes**. ADB connects through the emulator console port (host-local TCP), not through the emulator's virtual network.
 
 ## Design Decisions
 
-1. **Separate test files, not separate test cases**: Each emulator runs a different `.test.ts` file. This is the cleanest way to partition work across devices with `react-native-harness`.
+1. **One harness instance, not two**: Running two harness instances would cause WebSocket bridge port conflicts. Instead, emu2 just runs the app normally via `adb shell am start`.
 
-2. **No explicit coordination server**: The mDNS discovery timeout handles timing naturally. Adding a coordination mechanism (HTTP server, file polling) adds complexity without benefit.
+2. **No explicit coordination**: The mDNS discovery timeout (120s) handles timing naturally. The app on emu2 publishes instantly; the test on emu1 scans with a generous timeout.
 
-3. **`--json --outputFile` for result aggregation**: Jest's JSON output lets the CI combine results from both runners and fail if either fails.
+3. **SLIRP disabled at CI level, not in app code**: The emulator environment setup is purely infrastructure. The app and test code use standard `react-native-zeroconf` APIs.
 
-4. **SLIRP disabled at CI level, not in app code**: The emulator environment setup is purely infrastructure. The app and test code use standard `react-native-zeroconf` APIs with no test-specific workarounds.
-
-5. **The advertise test is also a test**: It asserts that publishing succeeds. If NSD registration fails, this test fails too, giving clear diagnostics.
+4. **Same APK on both emulators**: The app advertises an NSD service and runs a TCP echo server. On emu1, the harness injects tests that discover and connect. On emu2, the app just runs.
