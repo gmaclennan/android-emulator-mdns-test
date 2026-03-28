@@ -24,11 +24,12 @@ emulator @avd2 -no-window -gpu swiftshader_indirect -no-snapshot \
   -netdev socket,id=sharedlan,mcast=230.0.0.1:1234
 ```
 
-The QEMU instances exchange raw Ethernet frames over a host UDP multicast group, creating a shared L2 segment. The default SLIRP interface (`wlan0`) stays active for adb connectivity.
+The QEMU instances exchange raw Ethernet frames over a host UDP multicast group, creating a shared L2 segment.
 
-After boot, configure the second NIC inside each guest with static IPs:
+After boot, configure the second NIC with static IPs and disable the SLIRP interfaces so the shared network is the only one — mimicking a real device with one WiFi network:
 
 ```bash
+# Configure the shared NIC
 adb -s emulator-5554 root
 adb -s emulator-5554 shell "ip link set dev eth1 up"
 adb -s emulator-5554 shell "ip addr add 192.168.77.10/24 dev eth1"
@@ -36,7 +37,16 @@ adb -s emulator-5554 shell "ip addr add 192.168.77.10/24 dev eth1"
 adb -s emulator-5556 root
 adb -s emulator-5556 shell "ip link set dev eth1 up"
 adb -s emulator-5556 shell "ip addr add 192.168.77.11/24 dev eth1"
+
+# Disable the SLIRP interfaces so NSD uses the shared NIC.
+# ADB still works — it connects via the emulator console port, not the virtual network.
+for serial in emulator-5554 emulator-5556; do
+  adb -s $serial shell "ip link set wlan0 down"
+  adb -s $serial shell "ip link set radio0 down"
+done
 ```
+
+Disabling the SLIRP interfaces is important: the mDNS daemon advertises the IP addresses of all active interfaces. If SLIRP is active, the resolved address will be the SLIRP IP (`10.0.2.x`), which isn't routable between emulators. With only `eth1` active, the resolved address is naturally `192.168.77.x` — no app-level workarounds needed.
 
 ## Test Results
 
@@ -45,9 +55,9 @@ adb -s emulator-5556 shell "ip addr add 192.168.77.11/24 dev eth1"
 | `nsdRegistrationWorks` | Register an NSD service on a single emulator | PASS |
 | `nsdDiscoveryStarts` | Start NSD discovery on a single emulator | PASS |
 | `discoverServiceFromOtherEmulator` | Emulator 1 discovers Emulator 2's NSD service | PASS |
-| `connectToDiscoveredService` | Discover, resolve, then make a TCP connection | PASS |
+| `connectToDiscoveredService` | Discover, resolve, then make a TCP connection and exchange data | PASS |
 
-All 4 tests pass in ~1.1 seconds.
+All 4 tests pass in ~1.1 seconds. The app code uses standard `NsdManager` APIs with no test-specific workarounds.
 
 ## Approaches Compared
 
@@ -57,45 +67,26 @@ All 4 tests pass in ~1.1 seconds.
 - **TCP Connection**: PASS
 - **Root required**: No
 - **Host setup**: None
-- **How it works**: Adds a second `virtio-net-pci` NIC to each emulator connected via QEMU's `socket,mcast` backend. Both NICs share a virtual L2 segment.
+- **App workarounds**: None — standard NSD APIs work as-is
+- **How it works**: Adds a second `virtio-net-pci` NIC to each emulator connected via QEMU's `socket,mcast` backend. Disabling the SLIRP interfaces makes the shared NIC the only active network, so NSD naturally resolves to the correct address.
 
 ### TAP Bridge (`-net-tap`)
 
 - **mDNS Discovery**: PASS
 - **TCP Connection**: FAIL (timeout)
 - **Root required**: Yes (TAP/bridge creation)
-- **Host setup**: TAP interfaces + bridge + dnsmasq
-- **How it works**: Replaces the emulator's SLIRP backend entirely with a TAP interface on a host bridge. mDNS multicast works, but unicast TCP fails — likely because Android's wifi stack conflicts with the static IP assignment on `wlan0`.
+- **Host setup**: TAP interfaces + bridge
+- **How it works**: Replaces the emulator's SLIRP backend entirely with a TAP interface on a host bridge. mDNS multicast works, but unicast TCP fails — the wifi interface (`wlan0`) doesn't properly accept static IP reconfiguration.
 
 ## Key Findings
 
 ### 1. Android NSD discovers across all interfaces
 
-The research predicted that NSD might only bind to interfaces recognized by `ConnectivityService`. In practice, **NSD discovers services on secondary NICs** (like `eth1` added via QEMU) even without a formal Android `Network` object. Tested on API 30.
+The [research](https://claude.ai/share/f8f3a55f-727c-4117-a6a0-7aa3d73f3047) predicted that NSD might only bind to interfaces recognized by `ConnectivityService`. In practice, **NSD discovers services on secondary NICs** (like `eth1` added via QEMU) even without a formal Android `Network` object. Tested on API 30.
 
-### 2. `NsdServiceInfo.setHost()` is ignored on registration
+### 2. Disabling SLIRP makes NSD resolve to the correct address
 
-The mDNS daemon always advertises the primary interface's address, regardless of what you pass to `setHost()`. On QEMU socket, this means the resolved address is the SLIRP IP (`10.0.2.16`), which isn't routable between emulators.
-
-**Workaround**: Store the routable IP in an NSD TXT record attribute:
-
-```kotlin
-// Registration (on the advertising device)
-val serviceInfo = NsdServiceInfo().apply {
-    serviceName = "MyService"
-    serviceType = "_myservice._tcp."
-    port = serverSocket.localPort
-    setAttribute("address", "192.168.77.11")  // routable address
-}
-
-// Resolution (on the discovering device)
-val txtAddress = resolvedInfo.attributes["address"]?.let { String(it) }
-val host = if (txtAddress != null) {
-    InetAddress.getByName(txtAddress)
-} else {
-    resolvedInfo.host
-}
-```
+The mDNS daemon advertises addresses for all active interfaces. With both SLIRP (`wlan0`) and the shared NIC (`eth1`) active, the resolver returns the SLIRP address which isn't routable between emulators. Disabling SLIRP makes `eth1` the only active interface, so the resolved address is naturally the routable one. This avoids any app-level workarounds — the app code is identical to production.
 
 ### 3. QEMU socket multicast is undocumented but works
 
@@ -133,4 +124,4 @@ The workflow runs 3 jobs:
 
 1. **Baseline** — Single emulator via `reactivecircus/android-emulator-runner`, validates NSD registration and discovery work
 2. **TAP Bridge** — Two emulators with `-net-tap` on a host bridge (mDNS works, TCP fails)
-3. **QEMU Socket** — Two emulators with QEMU socket multicast (everything works)
+3. **QEMU Socket** — Two emulators with QEMU socket multicast (all 4 tests pass)
