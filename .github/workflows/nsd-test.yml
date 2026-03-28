@@ -373,6 +373,14 @@ jobs:
           ip addr show bridge0 2>/dev/null || true
           bridge fdb show 2>/dev/null | head -20 || true
 
+      - name: Upload emulator logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tap-bridge-emulator-logs
+          path: /tmp/emu*.log
+          if-no-files-found: ignore
+
       - name: Cleanup
         if: always()
         timeout-minutes: 1
@@ -607,6 +615,14 @@ jobs:
           echo "=== Emu2 NSD logs ===" ; timeout 10 adb -s emulator-5556 logcat -d 2>/dev/null | grep -iE "(nsd|mdns|NsdTest|dns-sd)" | tail -80 || true
           echo "=== Emu1 stderr ===" ; tail -30 /tmp/emu1.log 2>/dev/null || true
           echo "=== Emu2 stderr ===" ; tail -30 /tmp/emu2.log 2>/dev/null || true
+
+      - name: Upload emulator logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-socket-emulator-logs
+          path: /tmp/emu*.log
+          if-no-files-found: ignore
 
       - name: Cleanup
         if: always()
