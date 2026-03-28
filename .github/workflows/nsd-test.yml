@@ -45,6 +45,9 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           disable-animations: true
           script: |
+            echo "=== Installing APKs ==="
+            adb install -t app/build/outputs/apk/debug/app-debug.apk
+            adb install -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             echo "=== Running instrumented tests ==="
             adb shell am instrument \
               -w \
