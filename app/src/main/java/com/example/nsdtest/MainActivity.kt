@@ -80,6 +80,10 @@ class MainActivity : AppCompatActivity() {
             this.port = port
             if (hostAddress != null) {
                 host = hostAddress
+                // Also put the address in a TXT record as a fallback,
+                // since setHost() may be ignored by the mDNS daemon
+                setAttribute("address", hostAddress.hostAddress)
+                Log.i(TAG, "Set TXT record address=${hostAddress.hostAddress}")
             }
         }
 
