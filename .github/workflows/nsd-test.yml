@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      ANDROID_AVD_HOME: /home/runner/.android/avd
+      ANDROID_AVD_HOME: /home/runner/.config/.android/avd
 
     steps:
       - uses: actions/checkout@v4
@@ -407,7 +407,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      ANDROID_AVD_HOME: /home/runner/.android/avd
+      ANDROID_AVD_HOME: /home/runner/.config/.android/avd
 
     steps:
       - uses: actions/checkout@v4
