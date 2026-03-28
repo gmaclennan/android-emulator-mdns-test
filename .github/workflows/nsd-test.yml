@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   # Job 1: Validate the project builds and NSD works on a single emulator
   baseline:
@@ -206,16 +210,20 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const testOutput = fs.existsSync('/tmp/test-output.txt') ? fs.readFileSync('/tmp/test-output.txt', 'utf8').slice(-3000) : 'No test output';
-            const emu1Log = fs.existsSync('/tmp/emu1.log') ? fs.readFileSync('/tmp/emu1.log', 'utf8').slice(-1000) : 'No emu1 log';
-            const emu2Log = fs.existsSync('/tmp/emu2.log') ? fs.readFileSync('/tmp/emu2.log', 'utf8').slice(-1000) : 'No emu2 log';
-            const body = `## TAP Bridge Results\n\n### Test Output\n\`\`\`\n${testOutput}\n\`\`\`\n\n### Emulator 1 Log (tail)\n\`\`\`\n${emu1Log}\n\`\`\`\n\n### Emulator 2 Log (tail)\n\`\`\`\n${emu2Log}\n\`\`\``;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: body.slice(0, 65000)
-            });
+            const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return 'N/A'; } };
+            const body = [
+              '## TAP Bridge Results',
+              '### Test Output', '```', read('/tmp/test-output.txt').slice(-3000), '```',
+              '### Emu1 Log', '```', read('/tmp/emu1.log').slice(-1000), '```',
+              '### Emu2 Log', '```', read('/tmp/emu2.log').slice(-1000), '```',
+            ].join('\n');
+            const prNumber = context.payload.pull_request?.number;
+            if (prNumber) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: prNumber, body: body.slice(0, 65000)
+              });
+            } else { core.warning('No PR number found'); }
 
       - name: Cleanup
         if: always()
@@ -376,16 +384,20 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const testOutput = fs.existsSync('/tmp/test-output.txt') ? fs.readFileSync('/tmp/test-output.txt', 'utf8').slice(-3000) : 'No test output';
-            const emu1Log = fs.existsSync('/tmp/emu1.log') ? fs.readFileSync('/tmp/emu1.log', 'utf8').slice(-1000) : 'No emu1 log';
-            const emu2Log = fs.existsSync('/tmp/emu2.log') ? fs.readFileSync('/tmp/emu2.log', 'utf8').slice(-1000) : 'No emu2 log';
-            const body = `## QEMU Socket Results\n\n### Test Output\n\`\`\`\n${testOutput}\n\`\`\`\n\n### Emulator 1 Log (tail)\n\`\`\`\n${emu1Log}\n\`\`\`\n\n### Emulator 2 Log (tail)\n\`\`\`\n${emu2Log}\n\`\`\``;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: body.slice(0, 65000)
-            });
+            const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return 'N/A'; } };
+            const body = [
+              '## QEMU Socket Results',
+              '### Test Output', '```', read('/tmp/test-output.txt').slice(-3000), '```',
+              '### Emu1 Log', '```', read('/tmp/emu1.log').slice(-1000), '```',
+              '### Emu2 Log', '```', read('/tmp/emu2.log').slice(-1000), '```',
+            ].join('\n');
+            const prNumber = context.payload.pull_request?.number;
+            if (prNumber) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: prNumber, body: body.slice(0, 65000)
+              });
+            } else { core.warning('No PR number found'); }
 
       - name: Cleanup
         if: always()
