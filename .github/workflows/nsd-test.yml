@@ -2,6 +2,8 @@ name: NSD Discovery Test
 
 on:
   push:
+    branches: [main]
+  pull_request:
 
 jobs:
   # Job 1: Validate the project builds and NSD works on a single emulator
